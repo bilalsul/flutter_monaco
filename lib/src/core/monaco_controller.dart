@@ -217,10 +217,14 @@ class MonacoController {
   /// Set the editor language
   Future<void> setLanguage(MonacoLanguage language) async {
     if (!_onReady.isCompleted) {
-      // Queue the language - it will be applied when ready
-      // Don't await here to avoid blocking widget rendering
       _queuedLanguage = language;
-      return;
+      await _ensureReady();
+      if (_queuedLanguage == language) {
+        // Only use queued value if it hasn't been overwritten
+        _queuedLanguage = null;
+      } else {
+        return; // A newer language was queued, skip this one
+      }
     }
     await _webViewController.runJavaScript(
       'flutterMonaco.setLanguage(${jsonEncode(language.id)})',
@@ -567,10 +571,14 @@ class MonacoController {
   /// Set the editor content with validation
   Future<void> setValue(String value) async {
     if (!_onReady.isCompleted) {
-      // Queue the value - it will be applied when ready
-      // Don't await here to avoid blocking widget rendering
       _queuedValue = value;
-      return;
+      await _ensureReady();
+      if (_queuedValue == value) {
+        // Only use queued value if it hasn't been overwritten
+        _queuedValue = null;
+      } else {
+        return; // A newer value was queued, skip this one
+      }
     }
     await _webViewController.runJavaScript(
       'flutterMonaco.setValue(${jsonEncode(value)})',
