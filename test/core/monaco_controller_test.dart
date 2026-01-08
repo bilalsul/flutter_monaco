@@ -109,7 +109,7 @@ void main() {
 
         final joined = bundle.webview.executed.join('\n');
         expect(joined.contains('setTheme'), true);
-        // expect(joined.contains('setLanguage'), true);
+        expect(joined.contains('setLanguage'), true);
         expect(joined.contains('forceFocus'), true);
       });
     });
