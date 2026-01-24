@@ -86,12 +86,12 @@ class FakePlatformWebViewController implements PlatformWebViewController {
   }
 
   @override
-  Future<void> loadFile(String path) async {
+  Future<void> load({String? customCss, bool allowCdnFonts = false}) async {
     if (disposed) {
       throw StateError('Cannot load file on disposed controller');
     }
-    loadedFiles.add(path);
-    executed.add('LOAD_FILE:$path');
+    loadedFiles.add('LOAD_FILE:$customCss:$allowCdnFonts');
+    executed.add('LOAD_FILE:$customCss:$allowCdnFonts');
   }
 
   @override

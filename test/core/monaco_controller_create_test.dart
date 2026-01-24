@@ -31,6 +31,13 @@ class _ThrowingWebViewController implements PlatformWebViewController {
   }
 
   @override
+  Future<void> load({String? customCss, bool allowCdnFonts = false}) async {
+    if (throwOnLoadFile) {
+      throw StateError('loadFile failed');
+    }
+  }
+
+  @override
   Future<void> enableJavaScript() async {
     jsEnabled = true;
   }
@@ -52,13 +59,6 @@ class _ThrowingWebViewController implements PlatformWebViewController {
   @override
   Future<void> removeJavaScriptChannel(String name) async {
     _channels.remove(name);
-  }
-
-  @override
-  Future<void> loadFile(String path) async {
-    if (throwOnLoadFile) {
-      throw StateError('loadFile failed');
-    }
   }
 
   @override

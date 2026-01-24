@@ -1,61 +1,162 @@
-import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
-import 'package:flutter/material.dart';
-import 'package:webview_flutter/webview_flutter.dart' as wf;
-import 'package:webview_windows/webview_windows.dart' as ww;
+import 'package:flutter/widgets.dart';
+import 'package:flutter_monaco/src/platform/platform_webview_interface.dart';
+import 'package:flutter_monaco/src/platform/web_view_controller/web_view_controller.dart'
+    as base;
 
-/// A unified, platform-agnostic interface for controlling a WebView.
+// Export the interface so consumers can use it
+export 'platform_webview_interface.dart';
+
+/// Factory for creating platform-specific [PlatformWebViewController] instances.
 ///
-/// This abstract class provides a common API for interacting with the
-/// underlying WebView, whether it's `webview_flutter` on mobile and macOS
-/// or `webview_windows` on Windows. This allows the rest of the application
-/// to remain platform-independent.
-abstract class PlatformWebViewController {
-  /// Initialize the underlying web view if needed.
-  Future<void> initialize();
-
-  /// Enable unrestricted JavaScript execution if needed.
-  Future<void> enableJavaScript();
-
-  /// Executes the given JavaScript [script] in the WebView.
+/// This factory abstracts away platform detection and returns the appropriate
+/// WebView implementation for the current platform. Use this instead of
+/// directly instantiating platform-specific controllers.
+///
+/// ### Example
+///
+/// ```dart
+/// final controller = PlatformWebViewFactory.createController();
+/// await controller.initialize();
+/// await controller.load();
+/// ```
+///
+/// ### Testing
+///
+/// Use [debugCreateOverride] to inject mock controllers in tests:
+///
+/// ```dart
+/// PlatformWebViewFactory.debugCreateOverride = () => MockWebViewController();
+/// ```
+///
+/// See also:
+/// - [PlatformWebViewController] for the interface contract.
+/// - [WebViewController] for the forwarding implementation.
+class PlatformWebViewFactory {
+  /// Test hook to override controller creation with a mock implementation.
   ///
-  /// This method does not return a result from the script.
-  Future<void> runJavaScript(String script);
+  /// Set this before creating controllers in tests, and reset to `null`
+  /// after each test to avoid cross-test contamination.
+  @visibleForTesting
+  static PlatformWebViewController Function()? debugCreateOverride;
 
-  /// Executes the given JavaScript [script] and returns its result.
+  /// Creates a new [PlatformWebViewController] for the current platform.
   ///
-  /// The result is decoded from JSON if possible.
-  Future<Object?> runJavaScriptReturningResult(String script);
-
-  /// Adds a JavaScript channel named [name] that can be used by JavaScript
-  /// code to post messages to the Flutter application.
+  /// On native platforms, this returns a controller backed by `webview_flutter`
+  /// (Android/iOS/macOS) or `webview_windows` (Windows). On web, it returns
+  /// an iframe-based controller.
   ///
-  /// The [onMessage] callback is invoked when a message is received.
-  Future<void> addJavaScriptChannel(
-    String name,
-    void Function(String) onMessage,
-  );
+  /// If [debugCreateOverride] is set, returns the result of that function
+  /// instead, allowing test mocking.
+  static PlatformWebViewController createController() {
+    final override = debugCreateOverride;
+    if (override != null) {
+      return override();
+    }
 
-  /// Removes a previously added JavaScript channel named [name].
-  Future<void> removeJavaScriptChannel(String name);
-
-  /// Loads a local file into the WebView.
-  Future<void> loadFile(String path);
-
-  /// Sets the background color of the WebView.
-  Future<void> setBackgroundColor(Color color);
-
-  /// The platform view widget for the underlying WebView.
-  Widget get widget;
-
-  /// Disposes the controller and releases any associated resources.
-  void dispose();
+    return WebViewController();
+  }
 }
 
-/// Parses WebView2 ExecuteScript results, preserving JSON-like strings.
-@visibleForTesting
+/// Forwarding implementation of [PlatformWebViewController].
+///
+/// This class delegates all operations to the platform-specific
+/// [base.WebViewController] selected at compile time via conditional exports.
+/// It provides a stable API surface while allowing the underlying
+/// implementation to vary by platform.
+///
+/// **Note:** This class is internal. Use [PlatformWebViewFactory.createController]
+/// to obtain instances.
+///
+/// See also:
+/// - [web_view_controller.dart] for the conditional export logic.
+/// - [FlutterWebViewController] for Android/iOS/macOS implementation.
+/// - [WindowsWebViewController] for Windows implementation.
+class WebViewController implements PlatformWebViewController {
+  /// Creates a controller that forwards to the platform-specific implementation.
+  WebViewController() : _controller = base.WebViewController();
+
+  final base.WebViewController _controller;
+
+  @override
+  Widget get widget => _controller.widget;
+
+  @override
+  Future<void> initialize() => _controller.initialize();
+
+  @override
+  Future<void> load({String? customCss, bool allowCdnFonts = false}) {
+    return _controller.load(
+      customCss: customCss,
+      allowCdnFonts: allowCdnFonts,
+    );
+  }
+
+  @override
+  void dispose() {
+    return _controller.dispose();
+  }
+
+  @override
+  Future<void> enableJavaScript() => _controller.enableJavaScript();
+
+  @override
+  Future<Object?> addJavaScriptChannel(
+    String name,
+    void Function(String p1) onMessage,
+  ) {
+    return _controller.addJavaScriptChannel(name, onMessage);
+  }
+
+  @override
+  Future<Object?> removeJavaScriptChannel(String name) {
+    return _controller.removeJavaScriptChannel(name);
+  }
+
+  @override
+  Future<Object?> runJavaScript(String script) {
+    return _controller.runJavaScript(script);
+  }
+
+  @override
+  Future<Object?> runJavaScriptReturningResult(String script) {
+    return _controller.runJavaScriptReturningResult(script);
+  }
+
+  @override
+  Future<void> setBackgroundColor(Color color) =>
+      _controller.setBackgroundColor(color);
+}
+
+/// Normalizes WebView2 `ExecuteScript` results to Dart-friendly types.
+///
+/// WebView2 wraps JavaScript return values in JSON encoding, which means:
+/// - Strings come back double-quoted: `"hello"` instead of `hello`
+/// - `null` comes back as the literal string `"null"`
+/// - Objects/arrays may already be JSON strings
+///
+/// This function handles these cases:
+/// 1. Non-string results are returned as-is
+/// 2. The literal string `"null"` becomes Dart `null`
+/// 3. JSON-encoded strings (`"value"`) are decoded to plain strings
+/// 4. Other values are returned unchanged
+///
+/// ### Example
+///
+/// ```dart
+/// // WebView2 returns: "\"hello\""
+/// parseWindowsScriptResult('"hello"'); // Returns: 'hello'
+///
+/// // WebView2 returns: "null"
+/// parseWindowsScriptResult('null'); // Returns: null
+///
+/// // WebView2 returns: "42"
+/// parseWindowsScriptResult('42'); // Returns: '42' (still a string)
+/// ```
+///
+/// See also:
+/// - [WindowsWebViewController.runJavaScriptReturningResult] which uses this.
 Object? parseWindowsScriptResult(Object? result) {
   if (result is! String) return result;
 
@@ -73,309 +174,4 @@ Object? parseWindowsScriptResult(Object? result) {
   }
 
   return result;
-}
-
-/// A [PlatformWebViewController] implementation for `webview_flutter`.
-///
-/// This controller is used on Android, iOS, and macOS.
-class FlutterWebViewController implements PlatformWebViewController {
-  /// Creates a new `webview_flutter` controller.
-  FlutterWebViewController() {
-    _controller = wf.WebViewController();
-  }
-
-  late final wf.WebViewController _controller;
-  bool _disposed = false;
-  bool _initialized = false;
-
-  /// The underlying [wf.WebViewController] from the `webview_flutter` package.
-  wf.WebViewController get flutterController => _controller;
-
-  @override
-  Future<void> initialize() async {
-    if (_initialized) return;
-    _initialized = true;
-
-    setNavigationDelegate(
-      wf.NavigationDelegate(
-        onPageFinished: (url) {
-          debugPrint('[MonacoController] WebView Page Finished: $url');
-        },
-        onWebResourceError: (error) {
-          debugPrint(
-            '[MonacoController] WebView Error: ${error.description} on ${error.url}',
-          );
-        },
-      ),
-    );
-
-    await setOnConsoleMessage((message) {
-      debugPrint('[Monaco Console] ${message.level.name}: ${message.message}');
-    });
-  }
-
-  @override
-  Future<void> enableJavaScript() async {
-    await _controller.setJavaScriptMode(wf.JavaScriptMode.unrestricted);
-  }
-
-  /// Sets the background color of the WebView.
-  @override
-  Future<void> setBackgroundColor(Color color) async {
-    await _controller.setBackgroundColor(color);
-  }
-
-  /// Loads a Flutter asset into the WebView.
-  Future<void> loadFlutterAsset(String asset) async {
-    await _controller.loadFlutterAsset(asset);
-  }
-
-  /// Loads a local file into the WebView.
-  @override
-  Future<void> loadFile(String path) async {
-    await _controller.loadFile(path);
-  }
-
-  /// Sets the navigation delegate for the WebView.
-  void setNavigationDelegate(wf.NavigationDelegate delegate) {
-    _controller.setNavigationDelegate(delegate);
-  }
-
-  /// Sets a callback to be invoked when a JavaScript console message is logged.
-  Future<void> setOnConsoleMessage(
-    void Function(wf.JavaScriptConsoleMessage) onConsoleMessage,
-  ) async {
-    await _controller.setOnConsoleMessage(onConsoleMessage);
-  }
-
-  @override
-  Future<void> runJavaScript(String script) async {
-    try {
-      await _controller.runJavaScript(script);
-    } catch (e) {
-      debugPrint('[FlutterWebViewController] JS execution error: $e');
-      rethrow;
-    }
-  }
-
-  @override
-  Future<Object?> runJavaScriptReturningResult(String script) async {
-    try {
-      return await _controller.runJavaScriptReturningResult(script);
-    } catch (e) {
-      debugPrint('[FlutterWebViewController] JS result error: $e');
-      rethrow;
-    }
-  }
-
-  @override
-  Future<void> addJavaScriptChannel(
-    String name,
-    void Function(String) onMessage,
-  ) async {
-    await _controller.addJavaScriptChannel(
-      name,
-      onMessageReceived: (wf.JavaScriptMessage message) {
-        onMessage(message.message);
-      },
-    );
-  }
-
-  @override
-  Future<void> removeJavaScriptChannel(String name) async {
-    await _controller.removeJavaScriptChannel(name);
-  }
-
-  @override
-  Widget get widget => wf.WebViewWidget(controller: _controller);
-
-  @override
-  void dispose() {
-    if (_disposed) return;
-    _disposed = true;
-    // WebViewController doesn't have an explicit dispose method in webview_flutter
-  }
-}
-
-/// A [PlatformWebViewController] implementation for `webview_windows`.
-///
-/// This controller is used on the Windows platform and wraps the
-/// `WebviewController` from the `webview_windows` package.
-class WindowsWebViewController implements PlatformWebViewController {
-  /// Creates a new `webview_windows` controller.
-  WindowsWebViewController() {
-    _controller = ww.WebviewController();
-  }
-
-  late final ww.WebviewController _controller;
-  final Map<String, void Function(String)> _channels = {};
-  StreamSubscription<dynamic>? _webMessageSubscription;
-  bool _isInitialized = false;
-  bool _disposed = false;
-
-  /// The underlying [ww.WebviewController] from the `webview_windows` package.
-  ww.WebviewController get windowsController => _controller;
-
-  /// Initializes the WebView2 environment and the underlying controller.
-  ///
-  /// This must be called before any other methods.
-  @override
-  Future<void> initialize() async {
-    if (_isInitialized) return;
-
-    debugPrint('[WindowsWebViewController] Initializing WebView2...');
-    await _controller.initialize();
-    _isInitialized = true;
-
-    // Set up default configuration
-    await _controller.setBackgroundColor(const Color(0xFF1E1E1E));
-    await _controller.setPopupWindowPolicy(ww.WebviewPopupWindowPolicy.deny);
-
-    // Set up message handler BEFORE adding any channels
-    _setupWebMessageHandler();
-
-    debugPrint('[WindowsWebViewController] WebView2 initialized successfully');
-  }
-
-  @override
-  Future<void> enableJavaScript() async {}
-
-  void _setupWebMessageHandler() {
-    _webMessageSubscription?.cancel();
-
-    _webMessageSubscription = _controller.webMessage.listen((
-      dynamic rawMessage,
-    ) {
-      debugPrint(
-        '[WindowsWebViewController] Raw message: $rawMessage (${rawMessage.runtimeType})',
-      );
-
-      try {
-        String messageStr;
-
-        if (rawMessage is String) {
-          messageStr = rawMessage;
-        } else if (rawMessage is Map) {
-          messageStr = json.encode(rawMessage);
-        } else {
-          messageStr = rawMessage.toString();
-        }
-
-        _channels.forEach((channelName, handler) {
-          debugPrint(
-            '[WindowsWebViewController] Forwarding to channel: $channelName',
-          );
-          handler(messageStr);
-        });
-      } catch (e) {
-        debugPrint('[WindowsWebViewController] Error handling message: $e');
-      }
-    });
-  }
-
-  /// Loads the given HTML string into the WebView.
-  Future<void> loadHtmlString(String html, {String? baseUrl}) async {
-    debugPrint(
-      '[WindowsWebViewController] Loading HTML string (length: ${html.length})',
-    );
-    await _controller.loadStringContent(html);
-  }
-
-  /// Loads the specified URL into the WebView.
-  Future<void> loadUrl(String url) async {
-    debugPrint('[WindowsWebViewController] Loading URL: $url');
-    await _controller.loadUrl(url);
-  }
-
-  @override
-  Future<void> loadFile(String path) async {
-    final uri = Uri.file(path);
-    await loadUrl(uri.toString());
-  }
-
-  @override
-  Future<void> setBackgroundColor(Color color) async {
-    await _controller.setBackgroundColor(color);
-  }
-
-  @override
-  Future<void> runJavaScript(String script) async {
-    try {
-      await _controller.executeScript(script);
-    } catch (e) {
-      debugPrint('[WindowsWebViewController] JS execution error: $e');
-      rethrow;
-    }
-  }
-
-  @override
-  Future<Object?> runJavaScriptReturningResult(String script) async {
-    try {
-      final result = await _controller.executeScript(script);
-      return parseWindowsScriptResult(result);
-    } catch (e) {
-      debugPrint('[WindowsWebViewController] JS result error: $e');
-      rethrow;
-    }
-  }
-
-  @override
-  Future<void> addJavaScriptChannel(
-    String name,
-    void Function(String) onMessage,
-  ) async {
-    debugPrint(
-        '[WindowsWebViewController] Registering handler for channel: $name');
-
-    // Store the handler - HTML already defines window.flutterChannel
-    _channels[name] = onMessage;
-
-    // No need to inject JavaScript - the HTML already has the channel defined
-  }
-
-  @override
-  Future<void> removeJavaScriptChannel(String name) async {
-    _channels.remove(name);
-  }
-
-  @override
-  Widget get widget => ww.Webview(_controller);
-
-  @override
-  void dispose() {
-    if (_disposed) return;
-    _disposed = true;
-
-    debugPrint('[WindowsWebViewController] Disposing...');
-    _webMessageSubscription?.cancel();
-    _channels.clear();
-    if (_isInitialized) {
-      _controller.dispose();
-    }
-  }
-}
-
-/// A factory for creating the appropriate [PlatformWebViewController] for the
-/// current operating system.
-class PlatformWebViewFactory {
-  /// Overrides controller creation in tests.
-  @visibleForTesting
-  static PlatformWebViewController Function()? debugCreateOverride;
-
-  /// Creates and returns a [PlatformWebViewController].
-  ///
-  /// This will be a [WindowsWebViewController] on Windows and a
-  /// [FlutterWebViewController] on all other platforms.
-  static PlatformWebViewController createController() {
-    final override = debugCreateOverride;
-    if (override != null) {
-      return override();
-    }
-
-    if (Platform.isWindows) {
-      return WindowsWebViewController();
-    } else {
-      return FlutterWebViewController();
-    }
-  }
 }
